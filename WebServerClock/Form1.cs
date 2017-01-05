@@ -27,7 +27,7 @@ namespace WebServerClock
 
 
         
-        private void button1_Click(object sender, EventArgs e)
+        private async void button1_Click(object sender, EventArgs e)
         {
             HttpClient client = new HttpClient();
             client.BaseAddress = new Uri(this.textWebSiteURL.Text);
@@ -35,7 +35,7 @@ namespace WebServerClock
             HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Head, "/");
 
             DateTime t0 = DateTime.Now;
-            HttpResponseMessage rsp = client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead).Result;
+            HttpResponseMessage rsp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead);
             DateTime t3 = DateTime.Now;
             TimeSpan duration = t3 - t0;
 
