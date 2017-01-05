@@ -32,18 +32,20 @@ namespace WebServerClock
             HttpClient client = new HttpClient();
             client.BaseAddress = new Uri(this.textWebSiteURL.Text);
 
-            HttpRequestMessage hrm = new HttpRequestMessage(HttpMethod.Head, "/");
+            HttpRequestMessage req = new HttpRequestMessage(HttpMethod.Head, "/");
 
-            DateTime start = DateTime.Now;
-            HttpResponseMessage rsp = client.SendAsync(hrm, HttpCompletionOption.ResponseHeadersRead).Result;
-            TimeSpan deviation = DateTime.Now - start;
+            DateTime t0 = DateTime.Now;
+            HttpResponseMessage rsp = client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead).Result;
+            DateTime t3 = DateTime.Now;
+            TimeSpan duration = t3 - t0;
 
-            this.Offset = DateTime.Parse(rsp.Headers.GetValues("Date").First()) - DateTime.Now;
+            DateTime t1p = DateTime.Parse(rsp.Headers.GetValues("Date").First());
+            this.Offset = t1p - t0.AddMilliseconds(duration.TotalMilliseconds / 2);
+
             this.labelOffset.Text = string.Format(
                 @"時間差: {0} msec, 最大誤差值: {1} msec", 
                 this.Offset.TotalMilliseconds,
-                deviation.TotalMilliseconds);
-
+                duration.TotalMilliseconds / 2);
         }
     }
 }
