@@ -101,7 +101,7 @@
             this.Controls.Add(this.textWebSiteURL);
             this.Controls.Add(this.labWebSite);
             this.Name = "Form1";
-            this.Text = "網站同步時鐘 v1.0, By Andrew Wu";
+            this.Text = "遠端網站時鐘 v1.0, By Andrew Wu";
             this.ResumeLayout(false);
             this.PerformLayout();
 
