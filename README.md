@@ -16,7 +16,7 @@
 
 # Changes Log
 
-## ver 1.0 (2017/01/04) first release  
+## ver [1.0](https://github.com/andrew0928/WebServerClock/tree/v1.0) (2017/01/04) first release  
 已知問題:
 - URL 未做任何防呆及錯誤處理
 - 尚未提供 binary release / installation package
