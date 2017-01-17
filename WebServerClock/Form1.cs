@@ -39,13 +39,21 @@ namespace WebServerClock
             DateTime t3 = DateTime.Now;
             TimeSpan duration = t3 - t0;
 
-            DateTime t1p = DateTime.Parse(rsp.Headers.GetValues("Date").First());
-            this.Offset = t1p - t0.AddMilliseconds(duration.TotalMilliseconds / 2);
+            if (rsp.Headers.Date.HasValue)
+            {
+                DateTime t1p = rsp.Headers.Date.Value.DateTime; //DateTime.Parse(rsp.Headers.GetValues("Date").First());
+                this.Offset = t1p - t0.AddMilliseconds(duration.TotalMilliseconds / 2);
 
-            this.labelOffset.Text = string.Format(
-                @"時間差: {0} msec, 最大誤差值: {1} msec", 
-                this.Offset.TotalMilliseconds,
-                duration.TotalMilliseconds / 2);
+                this.labelOffset.Text = string.Format(
+                    @"時間差: {0} msec, 最大誤差值: {1} msec",
+                    this.Offset.TotalMilliseconds,
+                    duration.TotalMilliseconds / 2);
+            }
+            else
+            {
+                this.labelOffset.Text = @"網站沒有傳回 Date header 資料。";
+            }
+
         }
     }
 }
