@@ -41,7 +41,7 @@ namespace WebServerClock
 
             if (rsp.Headers.Date.HasValue)
             {
-                DateTime t1p = rsp.Headers.Date.Value.DateTime; //DateTime.Parse(rsp.Headers.GetValues("Date").First());
+                DateTime t1p = rsp.Headers.Date.Value.LocalDateTime; //DateTime.Parse(rsp.Headers.GetValues("Date").First());
                 this.Offset = t1p - t0.AddMilliseconds(duration.TotalMilliseconds / 2);
 
                 this.labelOffset.Text = string.Format(
