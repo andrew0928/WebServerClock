@@ -1,0 +1,19 @@
+[package]
+name = "clock-ping"
+version = "0.1.0"
+edition = "2024"
+description = "Measure a web server's clock offset using the HTTP Date header"
+license = "MIT"
+repository = "https://github.com/andrew0928/WebServerClock"
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
+clap = { version = "4.6", features = ["derive"] }
+crossterm = { version = "0.29", default-features = false, features = ["windows"] }
+encoding_rs = "0.8"
+httpdate = "1"
+mime = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
+scraper = { version = "0.24", default-features = false }
+tokio = { version = "1", features = ["macros", "rt", "signal", "time"] }
+unicode-width = "0.2"
