@@ -5,13 +5,13 @@
 ## C# 介面對照
 
 ```csharp
-public sealed record CalibrationOptions(int Count = 1, int? MinStepMs = null);
+public sealed record CalibrationOptions(int? Count = 4, int? MinStepMs = null); // null 持續執行
 public sealed record BoundaryResult(double DiffMs, int StepMs);
 
 public abstract record CalibrationEvent;
 public sealed record Preparing() : CalibrationEvent;
-public sealed record Calibrating(int Count, int StepMs) : CalibrationEvent;
-public sealed record RoundResult(int Count, BoundaryResult? Result) : CalibrationEvent;
+public sealed record Calibrating(long Count, int StepMs) : CalibrationEvent;
+public sealed record RoundResult(long Count, BoundaryResult? Result) : CalibrationEvent;
 
 public interface ICalibrator
 {
@@ -20,7 +20,7 @@ public interface ICalibrator
 }
 ```
 
-Rust 的對應入口為 `calibrate(client, url, options, emit).await`。三種事件都在 `CalibrationEvent` 中定義。回傳的 `bool` 表示準備成功且每輪皆有結果。Rust 的回呼可回傳 I/O 錯誤，讓 CLI 在輸出中斷時停止。[Rust 公開介面](../../src/calibration/session.rs)
+Rust 的對應入口為 `calibrate(client, url, options, emit).await`。有限輪數以 `CalibrationOptions::new` 建立，持續模式使用 `CalibrationOptions::continuous`。兩種模式共用一次準備。三種事件都在 `CalibrationEvent` 中定義。回傳的 `bool` 表示準備成功且每輪皆有結果。Rust 的回呼可回傳 I/O 錯誤，讓 CLI 在輸出中斷時停止。[Rust 公開介面](../../src/calibration/session.rs)
 
 ## 演算法
 
@@ -39,4 +39,4 @@ Rust 的對應入口為 `calibrate(client, url, options, emit).await`。三種�
 |---|---|
 | [邊界單元測試](../../src/calibration/tests.rs) | 以已知中點與 Date 模擬跨越，檢查取絕對值、保留符號、略過普通漂移與漏拍、拒絕矛盾樣本，以及 RTT 分級邊界。 |
 | [流程單元測試](../../src/calibration/session/tests.rs) | 注入假時鐘、RTT 與亂數。驗證五次準備、每輪抽樣與等待、不同時差的獨立輪次、手動步長、20 秒期限及粗掃退回值。 |
-| [CLI 端到端測試](../../tests/calibration_cli.rs) | 對本機 HTTP 伺服器執行 CLI，從 stdout、stderr 與結束碼驗證使用者看見的進度順序及帶符號的結果。 |
+| [CLI 端到端測試](../../tests/calibration_cli.rs) | 對本機 HTTP 伺服器執行 CLI，驗證預設四行、持續模式超過四輪、監控時鐘持續更新，以及 Ctrl+C 還原終端機。 |

@@ -16,7 +16,8 @@ fn help_and_guides_work_without_a_target() {
         assert!(text.contains(concat!("clock-ping ", env!("CARGO_PKG_VERSION"))));
         assert!(text.contains("clock-ping https://example.com -t"));
         assert!(text.contains("-m, --monitor"));
-        assert!(text.contains("--calibrate"));
+        assert!(!text.contains("--calibrate"));
+        assert!(text.contains("--min-step-ms"));
     }
 
     let index = invoke(&["--skill"]);
@@ -72,13 +73,13 @@ fn clap_rejects_invalid_invocations_before_probing() {
         &["--monitor"],
         &["--calibrate"],
         &["--calibrate", "--skill"],
-        &["https://example.com", "--count", "2"],
-        &["https://example.com", "--min-step-ms", "10"],
-        &["https://example.com", "--calibrate", "--count", "0"],
-        &["https://example.com", "--calibrate", "--min-step-ms", "0"],
-        &["https://example.com", "--calibrate", "--min-step-ms", "101"],
-        &["https://example.com", "--calibrate", "-m"],
-        &["https://example.com", "--calibrate", "-t"],
+        &["https://example.com", "--calibrate"],
+        &["https://example.com", "--count", "0"],
+        &["https://example.com", "--count", "4", "-t"],
+        &["https://example.com", "--count", "4", "--monitor"],
+        &["https://example.com", "--min-step-ms", "0"],
+        &["https://example.com", "--min-step-ms", "101"],
+        &["--skill", "measure", "--min-step-ms", "25"],
         &["--bad-flag"],
         &["ftp://example.com"],
         &["https://example.com", "--skill"],

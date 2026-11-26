@@ -1,8 +1,9 @@
-use std::collections::VecDeque;
 use std::io::{self, BufWriter, Stdout, Write};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use chrono::{Local, TimeDelta, Utc};
+use crate::calibrate::Progress;
+use chrono::{DateTime, Local, TimeDelta, Utc};
+use clock_ping::calibration::{BoundaryResult, CalibrationEvent, CalibrationOptions, calibrate};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     execute, queue,
@@ -10,67 +11,22 @@ use crossterm::{
     terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use reqwest::{Client, Url};
+use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
 use unicode_width::UnicodeWidthChar;
 
-use crate::probe::{Sample, Sampler, TIME_FORMAT};
-
-const WINDOW: Duration = Duration::from_secs(5);
 const REFRESH: Duration = Duration::from_millis(10);
-const EMPTY_TIME: &str = "--:--:--.---";
+const TIME_FORMAT: &str = "%H:%M:%S%.3f";
 
-#[derive(Default)]
-struct Window {
-    samples: VecDeque<Sample>,
-    last_success: Option<Sample>,
-    last_error: Option<String>,
+struct Reading {
+    number: u64,
+    result: BoundaryResult,
+    updated: DateTime<Utc>,
 }
 
-struct Stats {
-    mean: TimeDelta,
-    min: TimeDelta,
-    max: TimeDelta,
-}
-
-impl Window {
-    fn record(&mut self, result: Result<Sample, String>) {
-        match result {
-            Ok(sample) => {
-                self.samples.push_back(sample);
-                self.last_success = Some(sample);
-                self.last_error = None;
-            }
-            Err(error) => self.last_error = Some(error),
-        }
-    }
-
-    fn expire(&mut self, now: Instant) -> bool {
-        let before = self.samples.len();
-        while self
-            .samples
-            .front()
-            .is_some_and(|s| now - s.received >= WINDOW)
-        {
-            self.samples.pop_front();
-        }
-        self.samples.len() != before
-    }
-
-    fn stats(&self) -> Option<Stats> {
-        let first = self.samples.front()?.offset;
-        let mut min = first;
-        let mut max = first;
-        let mut sum = TimeDelta::zero();
-        for sample in &self.samples {
-            min = min.min(sample.offset);
-            max = max.max(sample.offset);
-            sum += sample.offset;
-        }
-        Some(Stats {
-            mean: sum / self.samples.len() as i32,
-            min,
-            max,
-        })
+impl Reading {
+    fn remote_at(&self, local: DateTime<Utc>) -> DateTime<Utc> {
+        local + TimeDelta::microseconds((self.result.diff_ms * 1000.0).round() as i64)
     }
 }
 
@@ -92,44 +48,48 @@ impl Screen {
 
     fn details(
         &mut self,
-        window: &Window,
-        stats: Option<&Stats>,
+        latest: &Reading,
+        status: &str,
+        last_failed: Option<u64>,
         url: &Url,
         title: Option<&str>,
     ) -> io::Result<()> {
         let out = &mut self.0;
         queue!(out, MoveTo(0, 2), Clear(ClearType::FromCursorDown))?;
-        let last = window.last_success;
-        let offset = |value: Option<TimeDelta>| match value {
-            Some(v) => format!("{:+.1} ms", v.as_seconds_f64() * 1000.0),
-            None => "—".to_owned(),
-        };
-        let rtt = last.map(|s| format!("{:.1} ms", s.half_trip.as_secs_f64() * 1000.0));
-        for (row, label, value) in [
-            (2, "最新時差", offset(last.map(|s| s.offset))),
-            (3, "平均時差（5 秒）", offset(stats.map(|s| s.mean))),
-            (4, "RTT/2", rtt.unwrap_or_else(|| "—".to_owned())),
-        ] {
-            let value = if stats.is_none() {
-                value.dim()
-            } else {
-                value.bold()
-            };
-            queue!(
-                out,
-                MoveTo(0, row),
-                PrintStyledContent(label.cyan()),
-                MoveTo(18, row),
-                PrintStyledContent(value)
-            )?;
-        }
-
         let size = crossterm::terminal::size()
             .ok()
             .filter(|&(w, h)| w > 0 && h > 0)
             .unwrap_or((80, 24));
         let quiet = ContentStyle::new().dim();
-        let mut row = 6;
+        let mut row = 2;
+        wrapped(
+            out,
+            &mut row,
+            size,
+            &format!("最新時差  {:+.1} ms", latest.result.diff_ms),
+            ContentStyle::new().bold(),
+        )?;
+        wrapped(
+            out,
+            &mut row,
+            size,
+            &format!(
+                "結果 count = {}（{} ms）",
+                latest.number, latest.result.step_ms
+            ),
+            quiet,
+        )?;
+        wrapped(out, &mut row, size, status, ContentStyle::new().cyan())?;
+        if let Some(n) = last_failed {
+            wrapped(
+                out,
+                &mut row,
+                size,
+                &format!("第 {n} 輪未取得結果"),
+                ContentStyle::new().yellow(),
+            )?;
+        }
+        row += 1;
         wrapped(
             out,
             &mut row,
@@ -146,21 +106,7 @@ impl Screen {
                 ContentStyle::new(),
             )?;
         }
-        row += 1;
-        let updated = last
-            .map(|s| {
-                s.local_at_receipt
-                    .with_timezone(&Local)
-                    .format(TIME_FORMAT)
-                    .to_string()
-            })
-            .unwrap_or_else(|| EMPTY_TIME.to_owned());
-        let range = format!(
-            "最近 5 秒  最小 {}   最大 {}   有效樣本 {} 筆",
-            offset(stats.map(|s| s.min)),
-            offset(stats.map(|s| s.max)),
-            window.samples.len()
-        );
+        let updated = latest.updated.with_timezone(&Local).format(TIME_FORMAT);
         wrapped(
             out,
             &mut row,
@@ -168,28 +114,13 @@ impl Screen {
             &format!("最後更新  {updated}（本機）"),
             quiet,
         )?;
-        wrapped(out, &mut row, size, &range, quiet)?;
-        if let Some(error) = &window.last_error {
-            wrapped(
-                out,
-                &mut row,
-                size,
-                &format!("量測失敗  {error}"),
-                ContentStyle::new().yellow(),
-            )?;
-        }
-        row += 1;
         wrapped(out, &mut row, size, "Ctrl+C 結束", quiet)
     }
 
-    fn clock(&mut self, mean: Option<TimeDelta>) -> io::Result<()> {
+    fn clock(&mut self, latest: &Reading) -> io::Result<()> {
+        let remote = latest.remote_at(Utc::now()).with_timezone(&Local);
         queue!(self.0, MoveTo(18, 0))?;
-        if let Some(offset) = mean {
-            let remote = (Utc::now() + offset).with_timezone(&Local);
-            write!(self.0, "{}", remote.format(TIME_FORMAT))?;
-        } else {
-            write!(self.0, "{EMPTY_TIME}")?;
-        }
+        write!(self.0, "{}", remote.format(TIME_FORMAT))?;
         self.0.flush()
     }
 }
@@ -243,40 +174,78 @@ impl Drop for Screen {
     }
 }
 
-pub async fn run(sampler: &mut Sampler<'_>, client: &Client, url: &Url) -> io::Result<()> {
+pub async fn run(client: &Client, url: &Url, options: CalibrationOptions) -> io::Result<bool> {
+    let (events, receiver) = mpsc::unbounded_channel();
+    let calibration = calibrate(client, url, options, move |event| {
+        events.send(event).map_err(io::Error::other)
+    });
+    let (success, ()) = tokio::try_join!(calibration, display(receiver, client, url))?;
+    Ok(success)
+}
+
+async fn display(
+    mut events: mpsc::UnboundedReceiver<CalibrationEvent>,
+    client: &Client,
+    url: &Url,
+) -> io::Result<()> {
+    let mut progress = Progress::default();
+    let mut latest = loop {
+        let Some(event) = events.recv().await else {
+            progress.clear()?;
+            eprintln!("準備失敗。");
+            return Ok(());
+        };
+        progress.stage(event)?;
+        if let CalibrationEvent::Result { number, result } = event {
+            if let Some(result) = result {
+                break Reading {
+                    number,
+                    result,
+                    updated: Utc::now(),
+                };
+            }
+            eprintln!("結果 count = {number}：未取得結果");
+        }
+    };
+
     let mut screen = Screen::enter()?;
     let lookup = crate::page_title::fetch(client, url);
     tokio::pin!(lookup);
     let mut lookup_done = false;
     let mut title = None;
-    let mut window = Window::default();
+    let mut status = String::new();
+    let mut last_failed = None;
     let mut frames = interval(REFRESH);
     frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        let next_sample = sampler.next();
-        tokio::pin!(next_sample);
-        let mut redraw_details = true;
-        let mut mean = None;
+        screen.details(&latest, &status, last_failed, url, title.as_deref())?;
+        screen.clock(&latest)?;
         loop {
             tokio::select! {
+                event = events.recv() => {
+                    match event {
+                        Some(CalibrationEvent::Calibrating { number, step_ms }) =>
+                            status = format!("校正中 count = {number}（{step_ms} ms）"),
+                        Some(CalibrationEvent::Result { number, result }) => {
+                            status.clear();
+                            if let Some(result) = result {
+                                latest = Reading { number, result, updated: Utc::now() };
+                                last_failed = None;
+                            } else {
+                                last_failed = Some(number);
+                            }
+                        }
+                        Some(CalibrationEvent::Preparing) => continue,
+                        None => return Ok(()),
+                    }
+                    break;
+                }
                 result = &mut lookup, if !lookup_done => {
                     title = result;
                     lookup_done = true;
-                    redraw_details = true;
-                }
-                result = &mut next_sample => {
-                    window.record(result);
                     break;
                 }
-                _ = frames.tick() => {
-                    if window.expire(Instant::now()) || redraw_details {
-                        let stats = window.stats();
-                        screen.details(&window, stats.as_ref(), url, title.as_deref())?;
-                        mean = stats.map(|s| s.mean);
-                        redraw_details = false;
-                    }
-                    screen.clock(mean)?;
-                }
+                _ = frames.tick() => screen.clock(&latest)?,
             }
         }
     }
@@ -287,37 +256,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_ages_during_failures_then_recovers_with_fresh_samples() {
-        let start = Instant::now();
-        let sample = |seconds, offset_ms| Sample {
-            received: start + Duration::from_secs(seconds),
-            local_at_receipt: Utc::now(),
-            offset: TimeDelta::milliseconds(offset_ms),
-            half_trip: Duration::ZERO,
+    fn remote_clock_applies_the_latest_signed_offset_across_second_boundaries() {
+        let local = DateTime::from_timestamp_millis(1_735_689_599_998).unwrap();
+        let mut reading = Reading {
+            number: 1,
+            result: BoundaryResult {
+                diff_ms: 4.5,
+                step_ms: 10,
+            },
+            updated: local,
         };
-        let mut window = Window::default();
-        assert!(window.stats().is_none());
-        window.record(Ok(sample(0, -1000)));
-        window.record(Ok(sample(1, 500)));
-        window.record(Err("timeout".into()));
-        let stats = window.stats().unwrap();
-        assert_eq!(stats.min, TimeDelta::milliseconds(-1000));
-        assert_eq!(stats.max, TimeDelta::milliseconds(500));
-        assert_eq!(stats.mean, TimeDelta::milliseconds(-250));
-
-        assert!(window.expire(start + WINDOW));
-        assert_eq!(window.stats().unwrap().mean, TimeDelta::milliseconds(500));
-        assert!(window.expire(start + Duration::from_secs(6)));
-        assert!(window.stats().is_none());
         assert_eq!(
-            window.last_success.unwrap().received,
-            start + Duration::from_secs(1)
+            reading.remote_at(local) - local,
+            TimeDelta::microseconds(4500)
         );
-        assert_eq!(window.last_error.as_deref(), Some("timeout"));
-
-        window.record(Ok(sample(7, 2200)));
-        assert!(window.last_error.is_none());
-        assert_eq!(window.samples.len(), 1);
-        assert_eq!(window.stats().unwrap().mean, TimeDelta::milliseconds(2200));
+        reading.result.diff_ms = -12.3;
+        let later = local + TimeDelta::seconds(8);
+        assert_eq!(
+            reading.remote_at(later) - later,
+            TimeDelta::microseconds(-12300)
+        );
     }
 }

@@ -2,14 +2,14 @@ mod calibrate;
 mod cli;
 mod monitor;
 mod page_title;
-mod probe;
 
-use std::io::{self, Write};
+use std::io;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::Parser;
 use cli::Cli;
-use probe::{INTERVAL, Sampler};
+use clock_ping::calibration::CalibrationOptions;
 use reqwest::Client;
 
 #[tokio::main(flavor = "current_thread")]
@@ -20,55 +20,37 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let url = cli.url.expect("clap requires URL when --skill is absent");
-    let client = match Client::builder().timeout(INTERVAL).build() {
+    let options = if cli.continuous || cli.monitor {
+        CalibrationOptions::continuous(cli.min_step_ms)
+    } else {
+        CalibrationOptions::new(cli.count.unwrap_or(4), cli.min_step_ms)
+    }
+    .expect("clap validates round count and step size");
+    let client = match Client::builder().timeout(Duration::from_secs(1)).build() {
         Ok(client) => client,
         Err(error) => {
             eprintln!("無法建立 HTTP 用戶端：{error}");
             return ExitCode::FAILURE;
         }
     };
-    let mut sampler = Sampler::new(&client, &url);
     let run = async {
-        if cli.calibrate {
-            calibrate::run(&client, &url, cli.count.unwrap_or(1), cli.min_step_ms).await
-        } else if cli.monitor {
-            monitor::run(&mut sampler, &client, &url).await?;
-            Ok(ExitCode::SUCCESS)
+        if cli.monitor {
+            monitor::run(&client, &url, options).await
         } else {
-            ping(&mut sampler, cli.continuous).await
+            calibrate::run(&client, &url, options).await
         }
     };
     let result = tokio::select! {
         result = run => result,
-        signal = tokio::signal::ctrl_c() => signal.map(|()| ExitCode::SUCCESS),
+        signal = tokio::signal::ctrl_c() => signal.map(|()| true),
     };
     match result {
-        Ok(code) => code,
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("clock-ping：{error}");
             ExitCode::FAILURE
         }
     }
-}
-
-async fn ping(sampler: &mut Sampler<'_>, continuous: bool) -> io::Result<ExitCode> {
-    let mut received_date = false;
-    for count in 1_u64.. {
-        match sampler.next().await {
-            Ok(sample) => {
-                writeln!(io::stdout().lock(), "{sample}")?;
-                received_date = true;
-            }
-            Err(error) => eprintln!("量測失敗：{error}"),
-        }
-        if !continuous && count == 4 {
-            break;
-        }
-    }
-    Ok(if received_date {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
 }

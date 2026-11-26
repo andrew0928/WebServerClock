@@ -108,7 +108,7 @@ async fn five_baseline_slots_then_one_delay_and_independent_search_per_result() 
     assert_eq!(io.round_starts[0].1, 5);
     assert!(io.delays.is_empty());
     for (i, delay) in [0, 1000, 397].into_iter().enumerate() {
-        let number = i as u32 + 1;
+        let number = i as u64 + 1;
         let index = 1 + 3 * i;
         assert_eq!(
             events[index],

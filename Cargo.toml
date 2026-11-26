@@ -1,6 +1,6 @@
 [package]
 name = "clock-ping"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Measure a web server's clock offset using the HTTP Date header"
 license = "MIT"
@@ -16,5 +16,5 @@ httpdate = "1"
 mime = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 scraper = { version = "0.24", default-features = false }
-tokio = { version = "1", features = ["macros", "rt", "signal", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "signal", "sync", "time"] }
 unicode-width = "0.2"

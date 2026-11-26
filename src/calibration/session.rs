@@ -11,13 +11,24 @@ const BASELINE_PROBES: u32 = 5;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CalibrationOptions {
-    count: NonZeroU32,
+    count: Option<NonZeroU32>,
     manual_step: Option<Duration>,
 }
 
 impl CalibrationOptions {
     pub fn new(count: u32, min_step_ms: Option<u16>) -> Result<Self, &'static str> {
         let count = NonZeroU32::new(count).ok_or("校正輪數必須大於零")?;
+        Self::with_limit(Some(count), min_step_ms)
+    }
+
+    pub fn continuous(min_step_ms: Option<u16>) -> Result<Self, &'static str> {
+        Self::with_limit(None, min_step_ms)
+    }
+
+    fn with_limit(
+        count: Option<NonZeroU32>,
+        min_step_ms: Option<u16>,
+    ) -> Result<Self, &'static str> {
         if min_step_ms.is_some_and(|ms| !(1..=100).contains(&ms)) {
             return Err("細掃步長須介於 1 到 100 ms");
         }
@@ -56,11 +67,11 @@ pub struct BoundaryResult {
 pub enum CalibrationEvent {
     Preparing,
     Calibrating {
-        number: u32,
+        number: u64,
         step_ms: u16,
     },
     Result {
-        number: u32,
+        number: u64,
         result: Option<BoundaryResult>,
     },
 }
@@ -96,7 +107,7 @@ async fn run(
         .or_else(|| baseline.fine_step())
         .filter(|s| *s < Duration::from_millis(100));
     let mut success = true;
-    for number in 1..=options.count.get() {
+    for number in 1u64.. {
         emit(CalibrationEvent::Calibrating {
             number,
             step_ms: 100,
@@ -112,6 +123,12 @@ async fn run(
         .await?;
         success &= result.is_some();
         emit(CalibrationEvent::Result { number, result })?;
+        if options
+            .count
+            .is_some_and(|count| number == u64::from(count.get()))
+        {
+            break;
+        }
     }
     Ok(success)
 }

@@ -7,31 +7,27 @@ use reqwest::Url;
     about = "從 HTTP Date 標頭估計網站與本機的時差",
     arg_required_else_help = true,
     help_template = "{name} {version} — {about}\n\n{usage-heading} {usage}\n\n{all-args}{after-help}",
-    after_help = "範例\n  clock-ping https://example.com\n  clock-ping https://example.com -t\n  clock-ping https://example.com -m\n  clock-ping https://example.com --calibrate\n  clock-ping --skill measure"
+    after_help = "範例\n  clock-ping https://example.com\n  clock-ping https://example.com -t\n  clock-ping https://example.com -m\n  clock-ping --skill measure"
 )]
 pub struct Cli {
-    /// HTTP 或 HTTPS 網址；一般量測使用根路徑，校正使用指定路徑
+    /// 要校正的 HTTP 或 HTTPS 網址（含路徑）
     #[arg(value_name = "URL", required_unless_present = "skill", value_parser = parse_url)]
     pub url: Option<Url>,
 
-    /// 每秒持續量測，直到按下 Ctrl+C（預設量測四次）
+    /// 持續逐輪校正，直到按下 Ctrl+C（預設四輪）
     #[arg(short = 't')]
     pub continuous: bool,
 
-    /// 監看遠端時鐘，每秒取樣，以最近 5 秒的平均時差每 10 ms 更新畫面
+    /// 以最新校正時差監看遠端時鐘，每 10 ms 更新畫面
     #[arg(short = 'm', long)]
     pub monitor: bool,
 
-    /// 先做五次 RTT 量測，再對指定路徑逐輪校正（每輪最多 20 秒）
-    #[arg(long, conflicts_with_all = ["continuous", "monitor", "skill"])]
-    pub calibrate: bool,
-
-    /// 校正結果筆數（預設 1）
-    #[arg(long, requires = "calibrate", value_parser = clap::value_parser!(u32).range(1..))]
+    /// 逐行模式的校正輪數（預設 4）
+    #[arg(long, conflicts_with_all = ["continuous", "monitor", "skill"], value_parser = clap::value_parser!(u32).range(1..))]
     pub count: Option<u32>,
 
     /// 手動指定細掃格距（1–100 ms），省略時由 RTT 基準決定
-    #[arg(long, requires = "calibrate", value_parser = clap::value_parser!(u16).range(1..=100))]
+    #[arg(long, conflicts_with = "skill", value_parser = clap::value_parser!(u16).range(1..=100))]
     pub min_step_ms: Option<u16>,
 
     /// 讀取離線操作指南，省略主題時列出索引
