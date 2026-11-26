@@ -66,13 +66,22 @@ pub struct BoundaryResult {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CalibrationEvent {
     Preparing,
+    Initialized {
+        mean_half_rtt_ms: f64,
+        fine_step_ms: Option<u16>,
+    },
     Calibrating {
         number: u64,
         step_ms: u16,
     },
+    RoundRtt {
+        number: u64,
+        mean_half_rtt_ms: f64,
+    },
     Result {
         number: u64,
         result: Option<BoundaryResult>,
+        mean_half_rtt_ms: Option<f64>,
     },
 }
 
@@ -99,13 +108,17 @@ async fn run(
 ) -> io::Result<bool> {
     emit(CalibrationEvent::Preparing)?;
     let baseline = prepare(runtime).await;
-    if baseline.count() == 0 {
+    let Some(mean_half_rtt_ms) = baseline.mean_half_ms() else {
         return Ok(false);
-    }
+    };
     let step = options
         .manual_step
         .or_else(|| baseline.fine_step())
         .filter(|s| *s < Duration::from_millis(100));
+    emit(CalibrationEvent::Initialized {
+        mean_half_rtt_ms,
+        fine_step_ms: step.map(|step| step.as_millis() as u16),
+    })?;
     let mut success = true;
     for number in 1u64.. {
         emit(CalibrationEvent::Calibrating {
@@ -117,12 +130,14 @@ async fn run(
         runtime
             .wait_until(start + Duration::from_millis(delay.into()))
             .await;
-        let result = find_boundary(runtime, step, start + BUDGET, |s| {
-            emit(CalibrationEvent::Calibrating { number, step_ms: s })
-        })
-        .await?;
+        let (result, mean_half_rtt_ms) =
+            find_boundary(runtime, step, start + BUDGET, number, &mut emit).await?;
         success &= result.is_some();
-        emit(CalibrationEvent::Result { number, result })?;
+        emit(CalibrationEvent::Result {
+            number,
+            result,
+            mean_half_rtt_ms,
+        })?;
         if options
             .count
             .is_some_and(|count| number == u64::from(count.get()))
@@ -153,8 +168,10 @@ async fn find_boundary(
     runtime: &mut impl CalibrationRuntime,
     step: Option<Duration>,
     deadline: Duration,
-    mut fine_started: impl FnMut(u16) -> io::Result<()>,
-) -> io::Result<Option<BoundaryResult>> {
+    number: u64,
+    emit: &mut impl FnMut(CalibrationEvent) -> io::Result<()>,
+) -> io::Result<(Option<BoundaryResult>, Option<f64>)> {
+    let mut rtts = RttStats::default();
     let origin = runtime.elapsed();
     let mut search = BoundarySearch::new(runtime.utc_now(), step);
     while let Some(next) = search.next_probe() {
@@ -171,25 +188,36 @@ async fn find_boundary(
         if received >= deadline {
             break;
         }
+        if reply.is_some() {
+            rtts.add(received - sent);
+            emit(CalibrationEvent::RoundRtt {
+                number,
+                mean_half_rtt_ms: rtts.mean_half_ms().expect("one successful probe"),
+            })?;
+        }
         let was_coarse = search.fine.is_none();
         if search
             .observe(sent - origin, received - origin, reply.and_then(|r| r.date))
             .is_err()
         {
-            return Ok(None);
+            return Ok((None, rtts.mean_half_ms()));
         }
         if was_coarse && let Some(scan) = &search.fine {
-            fine_started(scan.step.as_millis() as u16)?;
+            emit(CalibrationEvent::Calibrating {
+                number,
+                step_ms: scan.step.as_millis() as u16,
+            })?;
         }
     }
-    Ok(search.selected_diff_ns.map(|ns| BoundaryResult {
+    let result = search.selected_diff_ns.map(|ns| BoundaryResult {
         diff_ms: ns as f64 / 1_000_000.0,
         step_ms: search
             .fine
             .as_ref()
             .filter(|scan| scan.crossed)
             .map_or(100, |scan| scan.step.as_millis() as u16),
-    }))
+    });
+    Ok((result, rtts.mean_half_ms()))
 }
 
 #[cfg(test)]

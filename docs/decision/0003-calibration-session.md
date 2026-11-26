@@ -1,6 +1,6 @@
 # 0003　校正流程與跨秒樣本的選擇
 
-校正模組負責準備、每輪等待、搜尋邊界及選取結果。呼叫端只接收「準備中」、「校正中（輪次、步長）」及「結果」。每輪結束便可顯示，無須等全部輪次完成。
+校正模組負責準備、每輪等待、搜尋邊界及選取結果。呼叫端接收準備開始、初始化完成（平均 RTT/2、選定細掃步長）、各輪校正進度及結果。每輪結束便可顯示，無須等全部輪次完成。
 
 ## C# 介面對照
 
@@ -10,8 +10,10 @@ public sealed record BoundaryResult(double DiffMs, int StepMs);
 
 public abstract record CalibrationEvent;
 public sealed record Preparing() : CalibrationEvent;
+public sealed record Initialized(double MeanHalfRttMs, int? FineStepMs) : CalibrationEvent;
 public sealed record Calibrating(long Count, int StepMs) : CalibrationEvent;
-public sealed record RoundResult(long Count, BoundaryResult? Result) : CalibrationEvent;
+public sealed record RoundRtt(long Count, double MeanHalfRttMs) : CalibrationEvent;
+public sealed record RoundResult(long Count, BoundaryResult? Result, double? MeanHalfRttMs) : CalibrationEvent;
 
 public interface ICalibrator
 {
@@ -20,7 +22,7 @@ public interface ICalibrator
 }
 ```
 
-Rust 的對應入口為 `calibrate(client, url, options, emit).await`。有限輪數以 `CalibrationOptions::new` 建立，持續模式使用 `CalibrationOptions::continuous`。兩種模式共用一次準備。三種事件都在 `CalibrationEvent` 中定義。回傳的 `bool` 表示準備成功且每輪皆有結果。Rust 的回呼可回傳 I/O 錯誤，讓 CLI 在輸出中斷時停止。[Rust 公開介面](../../src/calibration/session.rs)
+Rust 的對應入口為 `calibrate(client, url, options, emit).await`。有限輪數以 `CalibrationOptions::new` 建立，持續模式使用 `CalibrationOptions::continuous`。兩種模式共用一次準備。這些事件都在 `CalibrationEvent` 中定義。回傳的 `bool` 表示準備成功且每輪皆有結果。Rust 的回呼可回傳 I/O 錯誤，讓 CLI 在輸出中斷時停止。[Rust 公開介面](../../src/calibration/session.rs)
 
 ## 演算法
 
@@ -39,4 +41,4 @@ Rust 的對應入口為 `calibrate(client, url, options, emit).await`。有限�
 |---|---|
 | [邊界單元測試](../../src/calibration/tests.rs) | 以已知中點與 Date 模擬跨越，檢查取絕對值、保留符號、略過普通漂移與漏拍、拒絕矛盾樣本，以及 RTT 分級邊界。 |
 | [流程單元測試](../../src/calibration/session/tests.rs) | 注入假時鐘、RTT 與亂數。驗證五次準備、每輪抽樣與等待、不同時差的獨立輪次、手動步長、20 秒期限及粗掃退回值。 |
-| [CLI 端到端測試](../../tests/calibration_cli.rs) | 對本機 HTTP 伺服器執行 CLI，驗證預設四行、持續模式超過四輪、監控時鐘持續更新，以及 Ctrl+C 還原終端機。 |
+| [CLI 端到端測試](../../tests/calibration_cli.rs) | 對本機 HTTP 伺服器執行 CLI，驗證初始化列與預設四筆檢測結果、持續模式超過四輪、監控時鐘持續更新，以及 Ctrl+C 還原終端機。 |

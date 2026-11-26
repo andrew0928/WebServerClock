@@ -56,11 +56,6 @@ impl RttStats {
         self.total += rtt;
     }
 
-    pub fn count(self) -> u32 {
-        self.count
-    }
-
-    #[cfg(test)]
     fn mean_half_ms(self) -> Option<f64> {
         (self.count > 0).then(|| self.total.as_secs_f64() * 500.0 / f64::from(self.count))
     }

@@ -78,15 +78,40 @@ fn default_prints_one_signed_result_per_round_then_exits_after_four() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stderr.is_empty());
-    let mut lines = stdout.lines();
+    let mut lines = stdout.lines().map(|line| {
+        let (timestamp, body) = line.strip_prefix("- [").unwrap().split_once("] ").unwrap();
+        assert_eq!(timestamp.len(), 8);
+        chrono::NaiveTime::parse_from_str(timestamp, "%H:%M:%S").unwrap();
+        body
+    });
+    let (rtt, plan) = lines
+        .next()
+        .unwrap()
+        .strip_prefix("初始化，RTT/2: ")
+        .unwrap()
+        .split_once("ms，位移: ")
+        .unwrap();
+    assert!(rtt.parse::<f64>().unwrap() >= 0.0);
+    let mut steps = plan.split(" | ");
+    assert_eq!(steps.next(), Some("100ms"));
+    let fine = steps.next();
+    assert!(matches!(fine, None | Some("10ms" | "20ms" | "25ms")));
+    assert_eq!(steps.next(), None);
     for number in 1..=4 {
         let line = lines.next().unwrap();
-        let value = [10, 20, 25, 100]
-            .into_iter()
-            .find_map(|step| line.strip_prefix(&format!("結果 count = {number}（{step} ms）：")))
-            .and_then(|s| s.strip_suffix(" ms"))
+        let (stages, fields) = line
+            .strip_prefix(&format!("檢測中，count = {number}，100ms - OK"))
+            .unwrap()
+            .split_once("，時間差: ")
             .unwrap();
-        assert!(value.starts_with(['+', '-']) && value.parse::<f64>().unwrap().is_finite());
+        if let Some(step) = fine {
+            assert!(stages == format!("，{step} - OK") || stages == format!("，{step} - 未確認"));
+        } else {
+            assert!(stages.is_empty());
+        }
+        let (diff, rtt) = fields.split_once(" ms，RTT/2: ").unwrap();
+        assert!(diff.starts_with(['+', '-']) && diff.parse::<f64>().unwrap().is_finite());
+        assert!(rtt.strip_suffix("ms").unwrap().parse::<f64>().unwrap() >= 0.0);
     }
     assert_eq!(lines.next(), None);
 }
@@ -109,11 +134,11 @@ mod continuous {
         }
     }
 
-    fn interrupt_after(flag: &str, ready: impl Fn(&str) -> bool) -> String {
+    fn interrupt_after(flag: &str, step: &str, ready: impl Fn(&str) -> bool) -> String {
         let site = Site::start();
         let mut child = Running(
             site.command()
-                .args([flag, "--min-step-ms", "100"])
+                .args([flag, "--min-step-ms", step])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -157,17 +182,36 @@ mod continuous {
 
     #[test]
     fn continuous_line_mode_reaches_fifth_round_and_stops_on_ctrl_c() {
-        let text = interrupt_after("-t", |s| s.contains("結果 count = 5（100 ms）"));
-        assert_eq!(text.lines().count(), 5);
+        let text = interrupt_after("-t", "100", |s| s.contains("檢測中，count = 5，100ms - OK"));
+        assert_eq!(text.lines().count(), 6);
+        assert!(text.lines().next().unwrap().ends_with("位移: 100ms"));
     }
 
     #[test]
     fn monitor_ticks_between_results_and_restores_the_terminal_on_ctrl_c() {
-        let text = interrupt_after("--monitor", |s| s.contains("結果 count = 2（100 ms）"));
+        let reset = "檢測中:   count = 2, 100ms - 檢測中, 25ms - 待測, RTT/2: —";
+        let next = "檢測中:   count = 3, 100ms - 檢測中, 25ms - 待測, RTT/2: —";
+        let text = interrupt_after("--monitor", "25", |s| s.contains(next));
         let (_, screen) = text.split_once("\x1b[?1049h").unwrap();
-        let (first, _) = screen.split_once("結果 count = 2（100 ms）").unwrap();
-        assert!(first.contains("結果 count = 1（100 ms）"));
-        assert!(first.contains("最新時差") && first.contains("校正中 count = 2"));
+        let (_, round_two) = screen.split_once(reset).unwrap();
+        let (first, after) = ["OK", "未確認"]
+            .into_iter()
+            .find_map(|fine| {
+                round_two.split_once(&format!(
+                    "檢測中:   count = 2, 100ms - OK, 25ms - {fine}, RTT/2: "
+                ))
+            })
+            .unwrap();
+        let live = first
+            .split_once("count = 2, 100ms - OK, 25ms - 檢測中, RTT/2: ")
+            .unwrap()
+            .1;
+        assert!(live.split_once("ms").unwrap().0.parse::<f64>().unwrap() >= 0.0);
+        assert!(screen.contains("最新時差: "));
+        let final_rtt = after.split_once("ms").unwrap().0;
+        assert!(final_rtt.parse::<f64>().unwrap() >= 0.0);
+        let (before_reset, _) = after.split_once(next).unwrap();
+        assert!(before_reset.contains(&format!(" ms, RTT/2: {final_rtt}ms")));
         let clocks: std::collections::HashSet<_> = first
             .split("\x1b[1;19H")
             .skip(1)

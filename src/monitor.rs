@@ -1,7 +1,7 @@
 use std::io::{self, BufWriter, Stdout, Write};
 use std::time::Duration;
 
-use crate::calibrate::Progress;
+use crate::calibrate::{Progress, RoundProgress};
 use chrono::{DateTime, Local, TimeDelta, Utc};
 use clock_ping::calibration::{BoundaryResult, CalibrationEvent, CalibrationOptions, calibrate};
 use crossterm::{
@@ -19,7 +19,7 @@ const REFRESH: Duration = Duration::from_millis(10);
 const TIME_FORMAT: &str = "%H:%M:%S%.3f";
 
 struct Reading {
-    number: u64,
+    mean_half_rtt_ms: Option<f64>,
     result: BoundaryResult,
     updated: DateTime<Utc>,
 }
@@ -28,6 +28,13 @@ impl Reading {
     fn remote_at(&self, local: DateTime<Utc>) -> DateTime<Utc> {
         local + TimeDelta::microseconds((self.result.diff_ms * 1000.0).round() as i64)
     }
+}
+
+fn rtt_text(ms: Option<f64>) -> String {
+    ms.map_or_else(
+        || "—".to_owned(),
+        |ms| format!("{}ms", (ms * 10.0).round() / 10.0),
+    )
 }
 
 struct Screen(BufWriter<Stdout>);
@@ -49,7 +56,7 @@ impl Screen {
     fn details(
         &mut self,
         latest: &Reading,
-        status: &str,
+        round: &RoundProgress,
         last_failed: Option<u64>,
         url: &Url,
         title: Option<&str>,
@@ -66,7 +73,11 @@ impl Screen {
             out,
             &mut row,
             size,
-            &format!("最新時差  {:+.1} ms", latest.result.diff_ms),
+            &format!(
+                "最新時差: {:+.1} ms, RTT/2: {}",
+                latest.result.diff_ms,
+                rtt_text(latest.mean_half_rtt_ms)
+            ),
             ContentStyle::new().bold(),
         )?;
         wrapped(
@@ -74,12 +85,13 @@ impl Screen {
             &mut row,
             size,
             &format!(
-                "結果 count = {}（{} ms）",
-                latest.number, latest.result.step_ms
+                "檢測中:   count = {}, {}, RTT/2: {}",
+                round.number,
+                round.stages(", "),
+                rtt_text(round.mean_half_rtt_ms)
             ),
-            quiet,
+            ContentStyle::new().cyan(),
         )?;
-        wrapped(out, &mut row, size, status, ContentStyle::new().cyan())?;
         if let Some(n) = last_failed {
             wrapped(
                 out,
@@ -189,6 +201,7 @@ async fn display(
     url: &Url,
 ) -> io::Result<()> {
     let mut progress = Progress::default();
+    let mut round = RoundProgress::default();
     let mut latest = loop {
         let Some(event) = events.recv().await else {
             progress.clear()?;
@@ -196,10 +209,16 @@ async fn display(
             return Ok(());
         };
         progress.stage(event)?;
-        if let CalibrationEvent::Result { number, result } = event {
+        round.observe(event);
+        if let CalibrationEvent::Result {
+            number,
+            result,
+            mean_half_rtt_ms,
+        } = event
+        {
             if let Some(result) = result {
                 break Reading {
-                    number,
+                    mean_half_rtt_ms,
                     result,
                     updated: Utc::now(),
                 };
@@ -213,30 +232,24 @@ async fn display(
     tokio::pin!(lookup);
     let mut lookup_done = false;
     let mut title = None;
-    let mut status = String::new();
     let mut last_failed = None;
     let mut frames = interval(REFRESH);
     frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        screen.details(&latest, &status, last_failed, url, title.as_deref())?;
+        screen.details(&latest, &round, last_failed, url, title.as_deref())?;
         screen.clock(&latest)?;
         loop {
             tokio::select! {
                 event = events.recv() => {
-                    match event {
-                        Some(CalibrationEvent::Calibrating { number, step_ms }) =>
-                            status = format!("校正中 count = {number}（{step_ms} ms）"),
-                        Some(CalibrationEvent::Result { number, result }) => {
-                            status.clear();
-                            if let Some(result) = result {
-                                latest = Reading { number, result, updated: Utc::now() };
-                                last_failed = None;
-                            } else {
-                                last_failed = Some(number);
-                            }
+                    let Some(event) = event else { return Ok(()) };
+                    round.observe(event);
+                    if let CalibrationEvent::Result { number, result, mean_half_rtt_ms } = event {
+                        if let Some(result) = result {
+                            latest = Reading { mean_half_rtt_ms, result, updated: Utc::now() };
+                            last_failed = None;
+                        } else {
+                            last_failed = Some(number);
                         }
-                        Some(CalibrationEvent::Preparing) => continue,
-                        None => return Ok(()),
                     }
                     break;
                 }
@@ -259,7 +272,7 @@ mod tests {
     fn remote_clock_applies_the_latest_signed_offset_across_second_boundaries() {
         let local = DateTime::from_timestamp_millis(1_735_689_599_998).unwrap();
         let mut reading = Reading {
-            number: 1,
+            mean_half_rtt_ms: Some(1.0),
             result: BoundaryResult {
                 diff_ms: 4.5,
                 step_ms: 10,

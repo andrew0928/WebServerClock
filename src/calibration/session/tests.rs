@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 struct Fake {
     now: Duration,
     baseline_rtts: [Option<u64>; 5],
+    probe_rtts: [Option<u64>; 2],
     calls: Vec<Duration>,
     delays: VecDeque<u16>,
     round_starts: Vec<(Duration, usize)>,
@@ -18,6 +19,7 @@ impl Fake {
         Self {
             now: Duration::ZERO,
             baseline_rtts: [Some(rtt); 5],
+            probe_rtts: [Some(2); 2],
             calls: vec![],
             delays: delays.iter().copied().collect(),
             round_starts: vec![],
@@ -51,7 +53,7 @@ impl CalibrationRuntime for Fake {
         let rtt = if i < 5 {
             self.baseline_rtts[i]
         } else {
-            Some(2)
+            self.probe_rtts[(i - 5) % 2]
         };
         let Some(rtt) = rtt else {
             self.now = deadline;
@@ -102,14 +104,25 @@ async fn five_baseline_slots_then_one_delay_and_independent_search_per_result() 
     let mut io = Fake::new(60, &[0, 1000, 397]);
     let (ok, events) = record(&mut io, 3, None).await;
     assert!(ok);
-    assert_eq!(events.len(), 10);
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|event| !matches!(event, RoundRtt { .. }))
+        .collect();
+    assert_eq!(events.len(), 11);
+    assert_eq!(
+        events[1],
+        Initialized {
+            mean_half_rtt_ms: 30.0,
+            fine_step_ms: Some(20)
+        }
+    );
     assert_eq!(events[0], Preparing);
     assert_eq!(io.calls[..5], [0, 1, 2, 3, 4].map(Duration::from_secs));
     assert_eq!(io.round_starts[0].1, 5);
     assert!(io.delays.is_empty());
     for (i, delay) in [0, 1000, 397].into_iter().enumerate() {
         let number = i as u64 + 1;
-        let index = 1 + 3 * i;
+        let index = 2 + 3 * i;
         assert_eq!(
             events[index],
             Calibrating {
@@ -127,11 +140,13 @@ async fn five_baseline_slots_then_one_delay_and_independent_search_per_result() 
         let Result {
             number: n,
             result: Some(reading),
+            mean_half_rtt_ms,
         } = events[index + 2]
         else {
             panic!("missing result")
         };
         assert_eq!(n, number);
+        assert_eq!(mean_half_rtt_ms, Some(1.0));
         assert_eq!(reading.step_ms, 20);
         // +600 ms produces a smaller magnitude on the early side (~-400 ms).
         let expected = if number == 1 { -400.0 } else { -600.0 };
@@ -150,9 +165,15 @@ async fn manual_step_overrides_high_rtt_but_still_runs_the_baseline() {
         let (ok, events) = record(&mut io, 1, manual).await;
         assert!(ok);
         assert_eq!(io.round_starts[0].1, 5);
-        assert_eq!(events.len(), if achieved == 100 { 3 } else { 4 });
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, CalibrationEvent::Calibrating { .. }))
+                .count(),
+            if achieved == 100 { 1 } else { 2 }
+        );
         assert!(matches!(events.last(), Some(CalibrationEvent::Result {
-            number: 1, result: Some(r)
+            number: 1, result: Some(r), ..
         }) if r.step_ms == achieved));
     }
 }
@@ -166,7 +187,7 @@ async fn baseline_failures_and_invalid_options() {
     let mut io = Fake::new(0, &[]);
     io.baseline_rtts = [None, Some(60), Some(100), None, Some(200)];
     let baseline = prepare(&mut io).await;
-    assert_eq!(baseline.count(), 3);
+    assert_eq!(baseline.count, 3);
     assert_eq!(baseline.mean_half_ms(), Some(60.0));
     let mut failed = Fake::new(0, &[]);
     failed.baseline_rtts = [None; 5];
@@ -188,7 +209,7 @@ async fn failed_rounds_count_and_the_next_round_can_recover() {
     let results: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            CalibrationEvent::Result { number, result } => Some((*number, result.is_some())),
+            CalibrationEvent::Result { number, result, .. } => Some((*number, result.is_some())),
             _ => None,
         })
         .collect();
@@ -207,5 +228,42 @@ async fn time_limit_returns_only_a_confirmed_crossing_and_includes_jitter() {
         };
         assert_eq!(result.map(|r| r.step_ms), expected);
         assert!(io.now - io.round_starts[0].0 <= BUDGET);
+    }
+}
+
+#[tokio::test]
+async fn round_half_rtt_uses_only_successful_heads_in_this_round() {
+    for rtts in [[Some(2), Some(8)], [None, Some(8)], [None, None]] {
+        let mut io = Fake::new(60, &[0]);
+        io.probe_rtts = rtts;
+        io.missing_round = Some(1);
+        let (_, events) = record(&mut io, 1, None).await;
+        let attempts = io.calls.len() - 5;
+        let successful: Vec<u64> = rtts.into_iter().cycle().take(attempts).flatten().collect();
+        let updates: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                CalibrationEvent::RoundRtt {
+                    number: 1,
+                    mean_half_rtt_ms,
+                } => Some(*mean_half_rtt_ms),
+                _ => None,
+            })
+            .collect();
+        let mut total = 0;
+        assert_eq!(updates.len(), successful.len());
+        for (i, rtt) in successful.iter().enumerate() {
+            total += rtt;
+            assert_eq!(updates[i], total as f64 / (2 * (i + 1)) as f64);
+        }
+        let expected = (!successful.is_empty())
+            .then(|| successful.iter().sum::<u64>() as f64 / (2 * successful.len()) as f64);
+        let Some(CalibrationEvent::Result {
+            mean_half_rtt_ms, ..
+        }) = events.last()
+        else {
+            panic!("missing round result")
+        };
+        assert_eq!(*mean_half_rtt_ms, expected);
     }
 }
