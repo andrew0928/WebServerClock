@@ -33,6 +33,10 @@ clock-ping https://example.com -m
 
 `RTT/2` 是從送出請求到收到標頭所花時間的一半。HTTP `Date` 只有整秒精度，因此即使往返很快，兩台已對時的設備仍可能顯示數百毫秒的時差。如果網址經過 CDN 或反向代理，量到的是產生該標頭的設備時鐘。
 
+### 校正時差
+
+從此版本原始碼執行 `cargo run --locked -- https://example.com/path --calibrate`，可對指定路徑做一輪最多 20 秒的校正。程式先用 100 ms 相位步長定位 HTTP `Date` 的跳秒區間，再依粗掃的平均 RTT/2 選擇 10、20 或 25 ms 步長。平均 RTT/2 達 100 ms 時回報粗掃結果。輸出包含**估計時差 ± 區間半寬**、粗掃和整輪平均 RTT/2、所選步長及樣本數。[量測指南](guides/measure.md) · [本機及臺鐵實測](docs/research/2026-11-27-trc-adaptive.md)
+
 ### 監看模式
 
 `-m` 或 `--monitor` 開啟固定畫面，每秒取樣一次。時鐘每 10 ms 以「目前本機時間 ＋ 最近 5 秒有效樣本的平均時差」更新。按 Ctrl+C 回到原本的終端機畫面。

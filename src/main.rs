@@ -1,3 +1,4 @@
+mod calibrate;
 mod cli;
 mod monitor;
 mod page_title;
@@ -28,7 +29,9 @@ async fn main() -> ExitCode {
     };
     let mut sampler = Sampler::new(&client, &url);
     let run = async {
-        if cli.monitor {
+        if cli.calibrate {
+            calibrate::run(&client, &url).await
+        } else if cli.monitor {
             monitor::run(&mut sampler, &client, &url).await?;
             Ok(ExitCode::SUCCESS)
         } else {

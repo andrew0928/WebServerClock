@@ -3,7 +3,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, TimeDelta, Utc};
-use reqwest::{Client, Url, header::DATE};
+use reqwest::{Client, Response, Url, header::DATE};
 use tokio::time::{Interval, MissedTickBehavior, interval};
 
 pub const INTERVAL: Duration = Duration::from_secs(1);
@@ -54,27 +54,11 @@ impl<'a> Sampler<'a> {
         let request = self.client.head(self.root.clone());
         let sent_at = Utc::now();
         let start = Instant::now();
-        let response = request.send().await.map_err(|error| {
-            if error.is_timeout() {
-                return "請求逾時（1 秒）。".to_owned();
-            }
-            let error = error.without_url();
-            let mut cause: &dyn Error = &error;
-            while let Some(source) = cause.source() {
-                cause = source;
-            }
-            cause.to_string()
-        })?;
+        let response = request.send().await.map_err(request_error)?;
         let received = Instant::now();
         let round_trip = received.duration_since(start);
         let half_trip = round_trip / 2;
-        let server_date = response
-            .headers()
-            .get(DATE)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| httpdate::parse_http_date(value).ok())
-            .map(DateTime::<Utc>::from)
-            .ok_or_else(|| format!("HTTP {} 回應缺少有效的 Date 標頭。", response.status()))?;
+        let server_date = server_date(&response)?;
         Ok(Sample {
             received,
             local_at_receipt: sent_at + round_trip,
@@ -82,4 +66,26 @@ impl<'a> Sampler<'a> {
             half_trip,
         })
     }
+}
+
+pub fn request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        return "請求逾時（1 秒）。".to_owned();
+    }
+    let error = error.without_url();
+    let mut cause: &dyn Error = &error;
+    while let Some(source) = cause.source() {
+        cause = source;
+    }
+    cause.to_string()
+}
+
+pub fn server_date(response: &Response) -> Result<DateTime<Utc>, String> {
+    response
+        .headers()
+        .get(DATE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .map(DateTime::<Utc>::from)
+        .ok_or_else(|| format!("HTTP {} 回應缺少有效的 Date 標頭。", response.status()))
 }

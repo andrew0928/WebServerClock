@@ -7,10 +7,10 @@ use reqwest::Url;
     about = "從 HTTP Date 標頭估計網站與本機的時差",
     arg_required_else_help = true,
     help_template = "{name} {version} — {about}\n\n{usage-heading} {usage}\n\n{all-args}{after-help}",
-    after_help = "範例\n  clock-ping https://example.com\n  clock-ping https://example.com -t\n  clock-ping https://example.com -m\n  clock-ping --skill measure"
+    after_help = "範例\n  clock-ping https://example.com\n  clock-ping https://example.com -t\n  clock-ping https://example.com -m\n  clock-ping https://example.com --calibrate\n  clock-ping --skill measure"
 )]
 pub struct Cli {
-    /// HTTP 或 HTTPS 網址，向該主機的根路徑送出 HEAD 請求
+    /// HTTP 或 HTTPS 網址；一般量測使用根路徑，校正使用指定路徑
     #[arg(value_name = "URL", required_unless_present = "skill", value_parser = parse_url)]
     pub url: Option<Url>,
 
@@ -21,6 +21,10 @@ pub struct Cli {
     /// 監看遠端時鐘，每秒取樣，以最近 5 秒的平均時差每 10 ms 更新畫面
     #[arg(short = 'm', long)]
     pub monitor: bool,
+
+    /// 以最多 20 秒向指定路徑取樣，輸出估計時差、誤差範圍與平均 RTT/2
+    #[arg(long, conflicts_with_all = ["continuous", "monitor", "skill"])]
+    pub calibrate: bool,
 
     /// 讀取離線操作指南，省略主題時列出索引
     #[arg(long, value_enum, value_name = "TOPIC", num_args = 0..=1,

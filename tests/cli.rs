@@ -16,6 +16,7 @@ fn help_and_guides_work_without_a_target() {
         assert!(text.contains(concat!("clock-ping ", env!("CARGO_PKG_VERSION"))));
         assert!(text.contains("clock-ping https://example.com -t"));
         assert!(text.contains("-m, --monitor"));
+        assert!(text.contains("--calibrate"));
     }
 
     let index = invoke(&["--skill"]);
@@ -69,6 +70,10 @@ fn clap_rejects_invalid_invocations_before_probing() {
         &["-t"],
         &["-m"],
         &["--monitor"],
+        &["--calibrate"],
+        &["--calibrate", "--skill"],
+        &["https://example.com", "--calibrate", "-m"],
+        &["https://example.com", "--calibrate", "-t"],
         &["--bad-flag"],
         &["ftp://example.com"],
         &["https://example.com", "--skill"],
