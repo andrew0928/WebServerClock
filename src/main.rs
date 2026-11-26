@@ -30,7 +30,7 @@ async fn main() -> ExitCode {
     let mut sampler = Sampler::new(&client, &url);
     let run = async {
         if cli.calibrate {
-            calibrate::run(&client, &url).await
+            calibrate::run(&client, &url, cli.count.unwrap_or(1), cli.min_step_ms).await
         } else if cli.monitor {
             monitor::run(&mut sampler, &client, &url).await?;
             Ok(ExitCode::SUCCESS)

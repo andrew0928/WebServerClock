@@ -22,9 +22,17 @@ pub struct Cli {
     #[arg(short = 'm', long)]
     pub monitor: bool,
 
-    /// 以最多 20 秒向指定路徑取樣，輸出估計時差、誤差範圍與平均 RTT/2
+    /// 先做五次 RTT 量測，再對指定路徑逐輪校正（每輪最多 20 秒）
     #[arg(long, conflicts_with_all = ["continuous", "monitor", "skill"])]
     pub calibrate: bool,
+
+    /// 校正結果筆數（預設 1）
+    #[arg(long, requires = "calibrate", value_parser = clap::value_parser!(u32).range(1..))]
+    pub count: Option<u32>,
+
+    /// 手動指定細掃格距（1–100 ms），省略時由 RTT 基準決定
+    #[arg(long, requires = "calibrate", value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub min_step_ms: Option<u16>,
 
     /// 讀取離線操作指南，省略主題時列出索引
     #[arg(long, value_enum, value_name = "TOPIC", num_args = 0..=1,

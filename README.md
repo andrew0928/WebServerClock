@@ -35,7 +35,7 @@ clock-ping https://example.com -m
 
 ### 校正時差
 
-從此版本原始碼執行 `cargo run --locked -- https://example.com/path --calibrate`，可對指定路徑做一輪最多 20 秒的校正。程式先用 100 ms 相位步長定位 HTTP `Date` 的跳秒區間，再依粗掃的平均 RTT/2 選擇 10、20 或 25 ms 步長。平均 RTT/2 達 100 ms 時回報粗掃結果。輸出包含**估計時差 ± 區間半寬**、粗掃和整輪平均 RTT/2、所選步長及樣本數。[量測指南](guides/measure.md) · [本機及臺鐵實測](docs/research/2026-11-27-trc-adaptive.md)
+用 `clock-ping URL --calibrate --count 5` 執行五輪校正。CLI 先顯示「準備中」，再顯示每輪的編號、目前步長與跨秒結果。結果中的正負號表示網站減本機，括號標示實際確認跨越的步長。可用 `--min-step-ms 25` 指定步長。[量測指南](guides/measure.md) · [C# 介面與 Rust 測試對照](docs/decision/0003-calibration-session.md)
 
 ### 監看模式
 

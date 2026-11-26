@@ -1,33 +1,51 @@
-//! A calibration round is driven by its caller's monotonic elapsed time.
-//! It performs no I/O and never reads a clock or sleeps.
+//! HTTP Date calibration sessions with an injectable runtime and a clock-free boundary estimator.
+mod http;
+mod session;
+pub use session::{BoundaryResult, CalibrationEvent, CalibrationOptions, calibrate};
+
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::time::Duration;
 
-pub const BUDGET: Duration = Duration::from_secs(20);
+const BUDGET: Duration = Duration::from_secs(20);
 const SECOND_NS: i128 = 1_000_000_000;
 const COARSE_PERIOD: Duration = Duration::from_millis(1100);
 
 #[derive(Clone, Copy, Debug)]
-pub struct OffsetRange {
+struct OffsetRange {
     /// Remote minus local, in nanoseconds. The lower bound is inclusive.
     pub lower_ns: i128,
     /// Exclusive upper bound.
     pub upper_ns: i128,
 }
 
-impl OffsetRange {
-    pub fn midpoint_ms(self) -> f64 {
-        (self.upper_ns + self.lower_ns) as f64 / 2_000_000.0
-    }
+#[derive(Clone, Copy)]
+struct SamplePoint {
+    midpoint_ns: i128,
+    diff_ns: i128,
+}
 
-    pub fn half_width_ms(self) -> f64 {
-        (self.upper_ns - self.lower_ns) as f64 / 2_000_000.0
+impl SamplePoint {
+    /// On a forward scan the ordinary drift is -step; a rollover adds one second.
+    /// Classify only adjacent one-tick observations, using the actual RTT midpoints.
+    fn crossing_diff(self, next: Self) -> Option<i128> {
+        let one_tick = SECOND_NS / 2..3 * SECOND_NS / 2;
+        let elapsed = next.midpoint_ns - self.midpoint_ns;
+        let jump = next.diff_ns - self.diff_ns;
+        if one_tick.contains(&elapsed) && one_tick.contains(&jump) {
+            Some(if self.diff_ns.abs() < next.diff_ns.abs() {
+                self.diff_ns
+            } else {
+                next.diff_ns
+            })
+        } else {
+            None
+        }
     }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct RttStats {
+struct RttStats {
     count: u32,
     total: Duration,
 }
@@ -42,7 +60,8 @@ impl RttStats {
         self.count
     }
 
-    pub fn mean_half_ms(self) -> Option<f64> {
+    #[cfg(test)]
+    fn mean_half_ms(self) -> Option<f64> {
         (self.count > 0).then(|| self.total.as_secs_f64() * 500.0 / f64::from(self.count))
     }
 
@@ -62,6 +81,8 @@ struct FineScan {
     width_ns: i128,
     step: Duration,
     index: i128,
+    previous_point: Option<SamplePoint>,
+    crossed: bool,
 }
 
 impl FineScan {
@@ -73,8 +94,11 @@ impl FineScan {
         half_rtt_ns: i128,
     ) -> Duration {
         let step = self.step.as_nanos() as i128;
-        self.index += 1;
+        if self.index == 0 {
+            self.previous_point = None;
+        }
         let advance = (self.index * step).min(self.width_ns);
+        self.index += 1;
         if advance == self.width_ns {
             self.index = 0;
         }
@@ -91,30 +115,28 @@ impl FineScan {
 }
 
 /// State of one round. Request the next probe time, then feed its observation back.
-pub struct Calibration {
+struct BoundarySearch {
+    selected_step: Option<Duration>,
     anchor_ns: i128,
     next: Option<Duration>,
     range: Option<OffsetRange>,
-    coarse: RttStats,
-    all: RttStats,
-    previous: Option<(Duration, i64)>,
-    crossed: bool,
+    selected_diff_ns: Option<i128>,
+    previous: Option<SamplePoint>,
     fine: Option<FineScan>,
     recent: VecDeque<Duration>,
 }
 
-impl Calibration {
+impl BoundarySearch {
     /// `anchor` is local UTC at elapsed time zero. The first probe is due immediately.
-    pub fn new(anchor: DateTime<Utc>) -> Self {
+    fn new(anchor: DateTime<Utc>, selected_step: Option<Duration>) -> Self {
         Self {
+            selected_step,
             anchor_ns: i128::from(anchor.timestamp()) * SECOND_NS
                 + i128::from(anchor.timestamp_subsec_nanos()),
             next: Some(Duration::ZERO),
             range: None,
-            coarse: RttStats::default(),
-            all: RttStats::default(),
+            selected_diff_ns: None,
             previous: None,
-            crossed: false,
             fine: None,
             recent: VecDeque::with_capacity(5),
         }
@@ -123,19 +145,6 @@ impl Calibration {
     pub fn next_probe(&self) -> Option<Duration> {
         self.next
     }
-    pub fn range(&self) -> Option<OffsetRange> {
-        self.range
-    }
-    pub fn coarse_rtt(&self) -> RttStats {
-        self.coarse
-    }
-    pub fn all_rtt(&self) -> RttStats {
-        self.all
-    }
-    pub fn fine_step(&self) -> Option<Duration> {
-        self.fine.as_ref().map(|f| f.step)
-    }
-
     /// Record one attempted request. Times are elapsed since the anchor; `date`
     /// is the HTTP Date in Unix seconds, or None for a failed probe.
     pub fn observe(
@@ -167,24 +176,37 @@ impl Calibration {
             if bounds.lower_ns >= bounds.upper_ns {
                 self.next = None;
                 self.range = None;
+                self.selected_diff_ns = None;
                 return Err("樣本的時差區間沒有交集");
             }
             self.range = Some(bounds);
             let rtt = received - sent;
-            self.all.add(rtt);
+            let midpoint_ns = (sent.as_nanos() + received.as_nanos()) as i128 / 2;
+            let point = SamplePoint {
+                midpoint_ns,
+                diff_ns: relative - midpoint_ns,
+            };
             if self.recent.len() == 5 {
                 self.recent.pop_front();
             }
             self.recent.push_back(rtt);
-            if self.fine.is_none() {
-                self.coarse.add(rtt);
-                self.crossed |= self.previous.is_some_and(|(prev_sent, prev_date)| {
-                    sent.saturating_sub(prev_sent) < Duration::from_secs(2)
-                        && date.checked_sub(prev_date) == Some(2)
-                });
-                self.previous = Some((sent, date));
-                if self.crossed && self.coarse.count >= 3 {
-                    let Some(step) = self.coarse.fine_step() else {
+            if let Some(scan) = &mut self.fine {
+                if let Some(diff) = scan
+                    .previous_point
+                    .and_then(|prev| prev.crossing_diff(point))
+                {
+                    self.selected_diff_ns = Some(diff);
+                    scan.crossed = true;
+                    self.next = None;
+                    return Ok(());
+                }
+                scan.previous_point = Some(point);
+            } else {
+                let diff = self.previous.and_then(|prev| prev.crossing_diff(point));
+                self.previous = Some(point);
+                if let Some(diff) = diff {
+                    self.selected_diff_ns = Some(diff);
+                    let Some(step) = self.selected_step else {
                         self.next = None;
                         return Ok(());
                     };
@@ -193,10 +215,15 @@ impl Calibration {
                         width_ns: bounds.upper_ns - bounds.lower_ns,
                         step,
                         index: 0,
+                        previous_point: None,
+                        crossed: false,
                     });
                 }
             }
         } else {
+            if let Some(scan) = &mut self.fine {
+                scan.previous_point = None;
+            }
             self.previous = None;
         }
 
